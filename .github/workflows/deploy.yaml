@@ -1,0 +1,79 @@
+name: Deploy Terraform and Ansible
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  deploy_terraform_script:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.4
+
+      - name: Install Azure CLI
+        run: |
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+          az version
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ./Terraform
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
+        working-directory: ./Terraform
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+
+      - name: Terraform Output
+        id: terraform_output
+        run: |
+          echo "master_ip=$(terraform output -raw master_public_ip)" >> $GITHUB_OUTPUT
+          echo "worker1_ip=$(terraform output -raw worker1_public_ip)" >> $GITHUB_OUTPUT
+          echo "worker2_ip=$(terraform output -raw worker2_public_ip)" >> $GITHUB_OUTPUT
+        working-directory: ./Terraform
+
+      - name: Setup SSH key
+        run: |
+          echo "${{ secrets.AZURE_SSH_PRIVATE_KEY }}" > /tmp/ssh_key
+          chmod 600 /tmp/ssh_key
+
+      - name: Create Ansible Inventory
+        run: |
+          cat <<EOF > ansible/inventory.yml
+          [master]
+          ${{ steps.terraform_output.outputs.master_ip }} ansible_user=${{ secrets.AZURE_VM_USERNAME }} ansible_ssh_private_key_file=/tmp/ssh_key
+
+          [workers]
+          ${{ steps.terraform_output.outputs.worker1_ip }} ansible_user=${{ secrets.AZURE_VM_USERNAME }} ansible_ssh_private_key_file=/tmp/ssh_key
+          ${{ steps.terraform_output.outputs.worker2_ip }} ansible_user=${{ secrets.AZURE_VM_USERNAME }} ansible_ssh_private_key_file=/tmp/ssh_key
+          EOF
+
+      - name: Install Ansible
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible
+
+      - name: Run Ansible Playbook
+        run: ansible-playbook -i inventory.yml playbook.yml
+        working-directory: ./ansible
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: False
